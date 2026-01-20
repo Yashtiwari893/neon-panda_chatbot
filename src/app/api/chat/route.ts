@@ -14,8 +14,24 @@ function isSmallTalk(message: string) {
   return SMALL_TALK.includes(message.trim().toLowerCase());
 }
 
-function getToday() {
-  return new Date().toLocaleDateString("en-US", { weekday: "long" });
+function detectExplicitDay(message: string): string | null {
+  const lower = message.toLowerCase();
+  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  for (const day of days) {
+    if (lower.includes(day)) {
+      return day.charAt(0).toUpperCase() + day.slice(1);
+    }
+  }
+  if (lower.includes("kal") || lower.includes("tomorrow")) {
+    const today = new Date();
+    today.setDate(today.getDate() + 1);
+    return today.toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
+  }
+  return null;
+}
+
+function getSystemDay() {
+  return new Date().toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
 }
 
 export async function POST(req: Request) {
@@ -26,7 +42,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    const today = getToday();
+    const systemDay = getSystemDay();
+    const explicitDay = detectExplicitDay(message);
+    const finalDay = explicitDay || systemDay;
 
     /* 1️⃣ Handle small talk WITHOUT embeddings */
     if (isSmallTalk(message)) {
@@ -62,7 +80,7 @@ export async function POST(req: Request) {
     const systemPrompt = `
 You are a WhatsApp chatbot.
 
-TODAY IS: ${today}
+TODAY IS: ${finalDay}
 
 LANGUAGE:
 Reply ONLY in:
@@ -76,11 +94,12 @@ RULES:
 - Friendly & natural
 - Short replies
 - Light emojis 😊
+- NEVER ask user what day it is
 
 INTELLIGENCE:
 - Understand intent (offer / discount / deal)
 - Use ONLY info below
-- Select ONLY TODAY's relevant content
+- Select ONLY ${finalDay}'s relevant content
 - Ignore other days
 
 FALLBACK:
@@ -114,3 +133,5 @@ ${contextText || "NO_INFORMATION_AVAILABLE"}
     );
   }
 }
+
+// "Auto day selection logic applied, user prompt removed."
