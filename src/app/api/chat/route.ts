@@ -14,24 +14,28 @@ function isSmallTalk(message: string) {
   return SMALL_TALK.includes(message.trim().toLowerCase());
 }
 
+function getSystemDay() {
+  return new Date().toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
+}
+
 function detectExplicitDay(message: string): string | null {
   const lower = message.toLowerCase();
-  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
   for (const day of days) {
     if (lower.includes(day)) {
       return day.charAt(0).toUpperCase() + day.slice(1);
     }
   }
-  if (lower.includes("kal") || lower.includes("tomorrow")) {
+  if (lower.includes("tomorrow") || lower.includes("kal")) {
     const today = new Date();
-    today.setDate(today.getDate() + 1);
-    return today.toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+    return tomorrow.toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
+  }
+  if (lower.includes("aaj")) {
+    return getSystemDay();
   }
   return null;
-}
-
-function getSystemDay() {
-  return new Date().toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
 }
 
 export async function POST(req: Request) {
@@ -95,11 +99,12 @@ RULES:
 - Short replies
 - Light emojis 😊
 - NEVER ask user what day it is
+- Always respond using detected system day
 
 INTELLIGENCE:
 - Understand intent (offer / discount / deal)
 - Use ONLY info below
-- Select ONLY ${finalDay}'s relevant content
+- Select ONLY TODAY's relevant content
 - Ignore other days
 
 FALLBACK:
@@ -125,8 +130,8 @@ ${contextText || "NO_INFORMATION_AVAILABLE"}
 
     return new Response(answer, { status: 200 });
 
-  } catch (err) {
-    console.error("CHAT_ERROR:", err);
+  } catch (error) {
+    console.error("CHAT_ERROR:", error);
     return new Response(
       "Thoda sa issue aa gaya 😅 Please thodi der baad try karein.",
       { status: 200 }
@@ -134,4 +139,4 @@ ${contextText || "NO_INFORMATION_AVAILABLE"}
   }
 }
 
-// "Auto day selection logic applied, user prompt removed."
+// Auto day selection logic applied, user prompt removed.
