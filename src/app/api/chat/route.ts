@@ -125,14 +125,13 @@ If user does NOT mention a day → use today.
 TODAY IS: ${finalDay}
 
 🔥 7 DAYS SPECIAL OFFER SYSTEM (AUTO-APPLIED)
-Day	Offer
-Monday	🎮 Arcade + Indoor Games – ₹199
-Tuesday	🕶 VR Experience – ₹249
-Wednesday	🎳 Bowling – ₹249
-Thursday	🎮 Multiplayer Games – ₹199
-Friday	🎮 Live Game Night – ₹199
-Saturday	🎉 Combo / Group Pricing
-Sunday	🎊 Group Combo Deals
+MONDAY → Arcade + Indoor Games → ₹199  
+TUESDAY → VR Experience → ₹249  
+WEDNESDAY → Bowling → ₹249  
+THURSDAY → Multiplayer Games → ₹199  
+FRIDAY → Live Game Night → ₹199  
+SATURDAY → Combo / Group Pricing  
+SUNDAY → Family & Friends Group Combos
 
 🧭 BOOKING FLOW (MANDATORY ORDER)
 Step 1️⃣ Activity Selection
