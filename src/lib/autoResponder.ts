@@ -52,6 +52,10 @@ function detectReset(text: string) {
   return resetWords.some(w => text.includes(w));
 }
 
+function normalizePhone(num: string) {
+  return num.replace(/\D/g, "");
+}
+
 /* -------- STATE DECISION ENGINE ---------- */
 
 function decideNextState(
@@ -61,32 +65,27 @@ function decideNextState(
   const state: ConversationState = { ...prev };
   const text = userText.toLowerCase();
 
-  // ACTIVITY
   if (!state.activity && text.includes("vr")) {
     state.activity = "VR Games";
     state.stage = "ACTIVITY_SELECTED";
     state.pending_fields = ["group_size", "date", "time"];
   }
 
-  // SUB ACTIVITY
   if (state.activity === "VR Games" && text.includes("racing")) {
     state.sub_activity = "VR Racing";
   }
 
-  // GROUP SIZE
   const num = text.match(/\b\d+\b/);
   if (num && !state.group_size) {
     state.group_size = Number(num[0]);
     state.pending_fields = state.pending_fields.filter(f => f !== "group_size");
   }
 
-  // TIME
   if ((text.includes("pm") || text.includes("am")) && !state.time) {
     state.time = userText;
     state.pending_fields = state.pending_fields.filter(f => f !== "time");
   }
 
-  // DATE
   if (
     text.includes("today") ||
     text.includes("saturday") ||
@@ -114,20 +113,27 @@ export async function generateAutoResponse(
   senderName?: string
 ) {
   try {
+    console.log("🚀 Auto responder triggered");
+
+    const cleanFrom = normalizePhone(fromNumber);
+    const cleanTo = normalizePhone(toNumber);
+
     /* 1️⃣ FILES */
-    const fileIds = await getFilesForPhoneNumber(toNumber);
+    const fileIds = await getFilesForPhoneNumber(cleanTo);
     if (fileIds.length === 0) {
+      console.warn("⚠️ No documents mapped to phone");
       return { success: false, noDocuments: true };
     }
 
-    /* 2️⃣ PHONE CONFIG + STATE */
+    /* 2️⃣ PHONE CONFIG */
     const { data: mappings } = await supabase
       .from("phone_document_mapping")
       .select("id, system_prompt, auth_token, origin, conversation_state")
-      .eq("phone_number", toNumber)
+      .eq("phone_number", cleanTo)
       .limit(1);
 
     if (!mappings?.length) {
+      console.error("❌ Phone config missing");
       return { success: false, error: "Phone config missing" };
     }
 
@@ -146,10 +152,8 @@ export async function generateAutoResponse(
       return { success: false, error: "Empty message" };
     }
 
-    const lowerText = finalUserText.toLowerCase();
-
-    /* 4️⃣ RESET OR ADVANCE STATE */
-    if (detectReset(lowerText)) {
+    /* 4️⃣ STATE UPDATE */
+    if (detectReset(finalUserText.toLowerCase())) {
       state = { ...DEFAULT_STATE };
     } else {
       state = decideNextState(state, finalUserText);
@@ -169,11 +173,11 @@ export async function generateAutoResponse(
     );
     const contextText = matches.map(m => m.chunk).join("\n\n");
 
-    /* 6️⃣ HISTORY (TYPE SAFE) */
+    /* 6️⃣ HISTORY */
     const { data: historyRows } = await supabase
       .from("whatsapp_messages")
       .select("content_text, event_type")
-      .or(`from_number.eq.${fromNumber},to_number.eq.${fromNumber}`)
+      .or(`from_number.eq.${cleanFrom},to_number.eq.${cleanFrom}`)
       .order("received_at", { ascending: true })
       .limit(10);
 
@@ -198,29 +202,25 @@ CURRENT STATE:
 - Pending: ${state.pending_fields.join(", ") || "none"}
 
 RULES:
-- NEVER restart conversation unless user asks
-- Ask ONLY for pending details
-- NO offers / welcome messages mid-flow
-- If stage is CONFIRM → confirm booking politely
+- Ask ONLY pending details
+- If CONFIRM → politely confirm booking
 - Hinglish only
-- Short, friendly WhatsApp replies
+- Short WhatsApp replies
 
 KNOWLEDGE:
 ${contextText || "NO_INFORMATION"}
 `.trim();
 
-    /* 8️⃣ LLM (STRICT SAFE) */
-    const messages: ChatCompletionMessageParam[] = [
-      { role: "system", content: systemPrompt },
-      ...history,
-      { role: "user", content: finalUserText },
-    ];
-
+    /* 8️⃣ LLM */
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       temperature: 0.2,
       max_tokens: 300,
-      messages,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...history,
+        { role: "user", content: finalUserText },
+      ],
     });
 
     let reply = completion.choices[0]?.message?.content;
@@ -228,26 +228,35 @@ ${contextText || "NO_INFORMATION"}
       return { success: false, error: "Empty AI response" };
     }
 
-    /* 9️⃣ GREETING ONLY FIRST MESSAGE */
+    /* 9️⃣ GREETING */
     const userName = cleanUserName(senderName);
     if (state.stage === "INIT" && history.length === 0 && userName) {
       reply = greetingPrefix(userName) + reply;
     }
 
-    /* 🔟 SEND WHATSAPP */
-    await sendWhatsAppMessage(
-      fromNumber,
+    /* 🔟 SEND WHATSAPP (SAFE) */
+    console.log("📤 Sending WhatsApp reply...");
+
+    const sendResult = await sendWhatsAppMessage(
+      cleanFrom,
       reply,
       mapping.auth_token,
       mapping.origin
     );
 
-    /* 11️⃣ SAVE BOT MESSAGE */
+    if (!sendResult?.success) {
+      console.error("❌ WhatsApp send failed", sendResult);
+      return { success: false, error: "WhatsApp send failed" };
+    }
+
+    console.log("✅ WhatsApp sent");
+
+    /* 11️⃣ SAVE MESSAGE */
     await supabase.from("whatsapp_messages").insert({
       message_id: `auto_${messageId}_${Date.now()}`,
       channel: "whatsapp",
-      from_number: toNumber,
-      to_number: fromNumber,
+      from_number: cleanTo,
+      to_number: cleanFrom,
       received_at: new Date().toISOString(),
       content_type: "text",
       content_text: reply,
@@ -258,7 +267,7 @@ ${contextText || "NO_INFORMATION"}
 
     return { success: true, response: reply, sent: true };
   } catch (err) {
-    console.error("Auto-response error:", err);
+    console.error("🔥 Auto-response error:", err);
     return { success: false, error: "Auto responder failed" };
   }
 }

@@ -112,7 +112,8 @@ export async function POST(req: Request) {
             payload.to,
             finalText,
             payload.messageId,
-            mediaUrl
+            mediaUrl,
+            payload.whatsapp?.senderName
         );
 
         return NextResponse.json({ success: true });
