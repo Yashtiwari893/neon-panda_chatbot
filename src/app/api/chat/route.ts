@@ -21,54 +21,76 @@ function getSystemDay() {
 function detectExplicitDay(message: string): string | null {
   const lower = message.toLowerCase();
   const days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+  
   for (const day of days) {
     if (lower.includes(day)) {
       return day.charAt(0).toUpperCase() + day.slice(1);
     }
   }
+  
   if (lower.includes("tomorrow") || lower.includes("kal")) {
     const today = new Date();
     const tomorrow = new Date(today);
     tomorrow.setDate(today.getDate() + 1);
     return tomorrow.toLocaleDateString("en-US", { weekday: "long", timeZone: "Asia/Kolkata" });
   }
-  if (lower.includes("aaj")) {
+  
+  if (lower.includes("aaj") || lower.includes("today")) {
     return getSystemDay();
   }
+  
   return null;
 }
 
 export async function POST(req: Request) {
   try {
-    const { session_id, message, file_id } = await req.json();
+    const body = await req.json();
+    const { session_id, message, file_id } = body;
 
     if (!session_id || !message) {
-      return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+      return NextResponse.json(
+        { error: "session_id and message are required" },
+        { status: 400 }
+      );
     }
 
     const systemDay = getSystemDay();
     const explicitDay = detectExplicitDay(message);
     const finalDay = explicitDay || systemDay;
 
-    /* 1️⃣ Handle small talk WITHOUT embeddings */
+    // Handle small talk WITHOUT embeddings
     if (isSmallTalk(message)) {
       const reply = `Hi! Neon Panda mein booking ke liye help chahiye? 😊`;
-      return new Response(reply, { status: 200 });
+      
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(reply));
+          controller.close();
+        }
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+        }
+      });
     }
 
-    /* 2️⃣ Try embeddings safely */
+    // Embed the user query and retrieve relevant chunks
     let contextText = "";
     try {
-      const embedding = await embedText(message);
-      if (embedding) {
-        const matches = await retrieveRelevantChunks(embedding, file_id, 8);
-        contextText = matches.map(m => m.chunk).join("\n\n");
+      const queryEmbedding = await embedText(message);
+      
+      if (queryEmbedding) {
+        const matches = await retrieveRelevantChunks(queryEmbedding, file_id, 8);
+        contextText = matches.map((m) => m.chunk).join("\n\n");
       }
     } catch (err) {
-      console.warn("⚠️ Embedding failed, continuing without RAG");
+      console.warn("⚠️ Embedding failed, continuing without RAG context");
     }
 
-    /* 3️⃣ Load history */
+    // Load conversation history
     const { data: historyRows } = await supabase
       .from("messages")
       .select("role, content")
@@ -77,54 +99,16 @@ export async function POST(req: Request) {
 
     const history = (historyRows || []).map(m => ({
       role: m.role,
-      content: m.content,
+      content: m.content
     }));
 
-    /* 4️⃣ SYSTEM PROMPT (NEON PANDA BOOKING ASSISTANT) */
+    // Build system prompt combining both approaches
     const systemPrompt = `
-🐼 Neon Panda – FINAL SYSTEM PROMPT
-
-Role: WhatsApp Booking Assistant
-Mode: Booking-First | System-Driven Day Logic | Short Replies
-
-🎯 YOUR ROLE
-
-You are Neon Panda's official WhatsApp booking executive.
-Your goal is to guide the user smoothly from interest → booking confirmation.
-
-You are:
-
-Friendly 😊
-
-Clear
-
-Efficient
-
-Booking-focused
-
-You are NOT a chatbot — you behave like a human staff member.
-
-🗓️ DAY SELECTION (CRITICAL RULE)
-
-⚙️ The system automatically detects today's day.
-
-STRICT RULES:
-
-❌ NEVER ask the user what day it is
-
-❌ NEVER ask "which day?"
-
-✅ Automatically apply today's offer
-
-🔁 Change the day ONLY if the user explicitly says:
-
-"Tomorrow", "Friday", "Sunday", etc.
-
-If user does NOT mention a day → use today.
+You are Neon Panda's WhatsApp booking executive. Be friendly, human-like, booking-focused.
 
 TODAY IS: ${finalDay}
 
-🔥 7 DAYS SPECIAL OFFER SYSTEM (AUTO-APPLIED)
+DAILY OFFERS:
 MONDAY → Arcade + Indoor Games → ₹199  
 TUESDAY → VR Experience → ₹249  
 WEDNESDAY → Bowling → ₹249  
@@ -133,60 +117,27 @@ FRIDAY → Live Game Night → ₹199
 SATURDAY → Combo / Group Pricing  
 SUNDAY → Family & Friends Group Combos
 
-🧭 BOOKING FLOW (MANDATORY ORDER)
-Step 1️⃣ Activity Selection
+${contextText ? `\nDOCUMENT CONTEXT:\n${contextText}\n` : ''}
 
-Ask:
+BOOKING FLOW:
+1. Ask activity: "Arcade 🎮, VR 🕶, Bowling 🎳, or Multiplayer?"
+2. Ask missing details: players, time (one question at a time, no repeats)
+3. Calculate price using today's offer
+4. Ask name + contact
+5. Confirm booking with format
 
-"What would you like to book — Arcade 🎮, VR 🕶, Bowling 🎳, or Multiplayer Games?"
+STRICT RULES:
+- ONLY use information from DOCUMENT CONTEXT if provided
+- If answer not in context, use your booking knowledge
+- NEVER ask for day (auto-detected)
+- Reply in user's language (Hinglish preferred)
+- Short replies (1-3 lines max)
+- Friendly emojis
+- No upselling before confirmation
+- Remember context, don't repeat questions
+- NEVER offer to do tasks you cannot do (generate QR codes, create files, etc.)
 
-Step 2️⃣ Collect Missing Details ONLY
-
-You need:
-
-Number of players
-
-Preferred time
-
-⚠️ IMPORTANT RULE
-
-If the user has already given players OR time,
-DO NOT repeat the same question.
-Ask ONLY for the missing detail.
-
-❌ BAD:
-"How many players and what time?" (repeated)
-
-✅ GOOD:
-"Got it 👍 3 players. What time works for you today?"
-
-Step 3️⃣ Price Calculation
-
-Apply today's offer price automatically
-
-Calculate total clearly
-
-Do NOT confirm booking yet
-
-Example:
-
-"For 3 players at ₹199 each, total comes to ₹597."
-
-Step 4️⃣ Ask for Name + Contact
-
-Ask politely:
-
-"Please share your full name and contact number to confirm the booking 😊"
-
-⚠️ CRITICAL
-
-NEVER say "Booking Confirmed"
-until name + contact are received.
-
-Step 5️⃣ FINAL CONFIRMATION MESSAGE
-
-Only after name + contact:
-
+CONFIRMATION FORMAT:
 🎉 Booking Confirmed!
 
 🐼 Name: <Name>
@@ -198,80 +149,52 @@ Only after name + contact:
 📍 Please arrive 10 minutes early.
 🐼 Team Neon Panda is excited to host you!
 
-💬 OPTIONAL SOFT PROMPT (POST-CONFIRMATION ONLY)
-
-After confirmation:
-
-"Need help with snacks 🍿, combo upgrades 🎮, or future bookings?
-Just message me anytime 😊"
-
-❌ Never upsell before confirmation.
-
-🚫 WHAT YOU MUST NOT DO
-
-❌ Ask for the day
-
-❌ Repeat questions already answered
-
-❌ Confirm booking without name + contact
-
-❌ Create fake urgency
-
-❌ Share other users' data
-
-❌ Over-explain
-
-If asked restricted info:
-
-"Sorry 🙏 This information can't be shared, but I can help you fully with offers and booking 😊"
-
-🧠 RESPONSE STYLE RULES
-
-Hinglish (Hindi + English)
-
-Short WhatsApp-style replies (1–3 lines)
-
-Friendly emojis (🎮 🐼 😊 🎉)
-
-Booking-focused
-
-Confident & calm tone
-
-✅ SUCCESS CRITERIA
-
-A perfect conversation:
-✔ Feels human
-✔ No repetition
-✔ Auto-day logic
-✔ Clean confirmation
-✔ User never feels confused
-
-INFO:
-${contextText || "NO_INFORMATION_AVAILABLE"}
+FALLBACK: "Sorry, I don't have that info right now."
 `.trim();
 
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...history,
+      { role: "user", content: message }
+    ];
+
+    // Call Groq with streaming
     const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...history,
-        { role: "user", content: message },
-      ],
+      messages,
       temperature: 0.3,
+      stream: true
     });
 
-    const answer = completion.choices[0]?.message?.content || 
-      "Abhi ispe exact info available nahi hai 😊";
+    // Create streaming response
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of completion) {
+            const content = chunk.choices[0]?.delta?.content || "";
+            if (content) {
+              controller.enqueue(encoder.encode(content));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          console.error("Streaming error:", error);
+          controller.error(error);
+        }
+      }
+    });
 
-    return new Response(answer, { status: 200 });
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Transfer-Encoding': 'chunked'
+      }
+    });
 
-  } catch (error) {
-    console.error("CHAT_ERROR:", error);
-    return new Response(
-      "Thoda sa issue aa gaya 😅 Please thodi der baad try karein.",
-      { status: 200 }
-    );
+  } catch (err: unknown) {
+    console.error("CHAT_ERROR:", err);
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-
-// Auto day selection logic applied, user prompt removed.
