@@ -48,8 +48,9 @@ function greetingPrefix(name?: string | null) {
 }
 
 function detectReset(text: string) {
-  const resetWords = ["restart", "start again", "menu", "reset"];
-  return resetWords.some(w => text.includes(w));
+  return ["restart", "start again", "menu", "reset"].some(w =>
+    text.includes(w)
+  );
 }
 
 function normalizePhone(num: string) {
@@ -81,14 +82,14 @@ function decideNextState(
     state.pending_fields = state.pending_fields.filter(f => f !== "group_size");
   }
 
-  if ((text.includes("pm") || text.includes("am")) && !state.time) {
+  if ((text.includes("am") || text.includes("pm")) && !state.time) {
     state.time = userText;
     state.pending_fields = state.pending_fields.filter(f => f !== "time");
   }
 
   if (
     text.includes("today") ||
-    text.includes("saturday") ||
+    text.includes("tomorrow") ||
     /\d{2}\/\d{2}\/\d{4}/.test(text)
   ) {
     state.date = userText;
@@ -115,25 +116,32 @@ export async function generateAutoResponse(
   try {
     console.log("🚀 Auto responder triggered");
 
-    const cleanFrom = normalizePhone(fromNumber);
-    const cleanTo = normalizePhone(toNumber);
+    const cleanFrom = normalizePhone(fromNumber); // USER
+    const cleanTo = normalizePhone(toNumber);     // BUSINESS
+
+    console.log("🔎 Phone lookup", { cleanFrom, cleanTo });
 
     /* 1️⃣ FILES */
     const fileIds = await getFilesForPhoneNumber(cleanTo);
-    if (fileIds.length === 0) {
-      console.warn("⚠️ No documents mapped to phone");
+    if (!fileIds.length) {
+      console.warn("⚠️ No documents mapped");
       return { success: false, noDocuments: true };
     }
 
     /* 2️⃣ PHONE CONFIG */
-    const { data: mappings } = await supabase
+    const { data: mappings, error } = await supabase
       .from("phone_document_mapping")
       .select("id, system_prompt, auth_token, origin, conversation_state")
       .eq("phone_number", cleanTo)
       .limit(1);
 
-    if (!mappings?.length) {
-      console.error("❌ Phone config missing");
+    if (error) {
+      console.error("❌ Mapping query error:", error);
+      return { success: false, error: "Mapping query failed" };
+    }
+
+    if (!mappings || mappings.length === 0) {
+      console.error("❌ Phone config missing for:", cleanTo);
       return { success: false, error: "Phone config missing" };
     }
 
@@ -143,12 +151,14 @@ export async function generateAutoResponse(
 
     /* 3️⃣ USER TEXT */
     let finalUserText = messageText?.trim() || "";
+
     if (!finalUserText && mediaUrl) {
       const transcript = await speechToText(mediaUrl);
       finalUserText = transcript?.text || "";
     }
 
     if (!finalUserText) {
+      console.warn("⚠️ Empty user message");
       return { success: false, error: "Empty message" };
     }
 
@@ -171,6 +181,7 @@ export async function generateAutoResponse(
       fileIds,
       6
     );
+
     const contextText = matches.map(m => m.chunk).join("\n\n");
 
     /* 6️⃣ HISTORY */
@@ -182,10 +193,10 @@ export async function generateAutoResponse(
       .limit(10);
 
     const history: ChatCompletionMessageParam[] = (historyRows || [])
-      .filter(m => m.content_text)
-      .map(m => ({
-        role: m.event_type === "MoMessage" ? "user" : "assistant",
-        content: String(m.content_text),
+      .filter(r => r.content_text)
+      .map(r => ({
+        role: r.event_type === "MoMessage" ? "user" : "assistant",
+        content: String(r.content_text),
       }));
 
     /* 7️⃣ SYSTEM PROMPT */
@@ -234,11 +245,11 @@ ${contextText || "NO_INFORMATION"}
       reply = greetingPrefix(userName) + reply;
     }
 
-    /* 🔟 SEND WHATSAPP (SAFE) */
-    console.log("📤 Sending WhatsApp reply...");
+    /* 🔟 SEND WHATSAPP */
+    console.log("📤 Sending WhatsApp reply");
 
     const sendResult = await sendWhatsAppMessage(
-      cleanFrom,
+      cleanFrom,                 // USER NUMBER
       reply,
       mapping.auth_token,
       mapping.origin
@@ -249,9 +260,7 @@ ${contextText || "NO_INFORMATION"}
       return { success: false, error: "WhatsApp send failed" };
     }
 
-    console.log("✅ WhatsApp sent");
-
-    /* 11️⃣ SAVE MESSAGE */
+    /* 11️⃣ SAVE BOT MESSAGE */
     await supabase.from("whatsapp_messages").insert({
       message_id: `auto_${messageId}_${Date.now()}`,
       channel: "whatsapp",
@@ -264,6 +273,8 @@ ${contextText || "NO_INFORMATION"}
       event_type: "MtMessage",
       is_in_24_window: true,
     });
+
+    console.log("✅ Auto reply completed");
 
     return { success: true, response: reply, sent: true };
   } catch (err) {
